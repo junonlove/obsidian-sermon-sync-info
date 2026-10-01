@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>스캔 PDF 변환기</title>
+<style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic",sans-serif;line-height:1.6;
+--bg:#f6f8fb;--card:#fff;--line:#dce3ed;--text:#172033;--muted:#5c6777;--accent:#1769aa;--head:#173b67;--warn:#a4361f;--ok:#1f7a3f}
+@media(prefers-color-scheme:dark){:root{--bg:#101722;--card:#182231;--line:#334155;--text:#e7edf6;--muted:#b4bfce;--accent:#82bfff;--head:#9cc9ff;--warn:#ff9b85;--ok:#7fd99c}}
+*{box-sizing:border-box}
+body{margin:0;padding:32px 16px;background:var(--bg);color:var(--text)}
+main{max-width:820px;margin:0 auto;background:var(--card);padding:32px;border:1px solid var(--line);border-radius:16px}
+h1{color:var(--head);margin:0 0 .25rem;line-height:1.2}
+.sub{color:var(--muted);margin:0 0 1.5rem}
+fieldset{border:1px solid var(--line);border-radius:12px;padding:12px 16px 16px;margin:0 0 16px}
+legend{font-weight:600;padding:0 6px}
+label{display:inline-flex;align-items:center;gap:6px;margin:4px 16px 4px 0}
+input[type=text],input[type=password],select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text)}
+input[type=password]{width:100%;max-width:420px}
+#drop{display:block;border:2px dashed var(--line);border-radius:12px;padding:24px;text-align:center;cursor:pointer;margin:0}
+#drop.over{border-color:var(--accent)}
+#fileName{font-weight:600}
+.hint{color:var(--muted);font-size:.9em;margin:.25rem 0 0}
+.row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
+button{font:inherit;padding:10px 20px;border-radius:10px;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer}
+button.ghost{background:transparent;color:var(--accent)}
+button:disabled{opacity:.45;cursor:default}
+progress{width:100%;height:14px}
+#status{margin:.5rem 0}
+#log{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;max-height:180px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;white-space:pre-wrap;display:none}
+.warn{color:var(--warn)}.ok{color:var(--ok)}
+#results a{display:inline-block;margin:6px 12px 6px 0;font-weight:600;color:var(--accent)}
+textarea{width:100%;min-height:260px;font:13px/1.5 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+.hidden{display:none!important}
+@media(max-width:560px){main{padding:20px}}
+</style>
+</head>
+<body>
+<main>
+<h1>스캔 PDF 변환기</h1>
+<p class="sub">스캔 PDF → Markdown(.md) · 검색 가능한 PDF. 파일은 이 브라우저 안에서만 처리합니다(Claude 모드는 쪽 이미지를 Anthropic API로 전송).</p>
+
+<fieldset>
+  <legend>1. 파일</legend>
+  <label id="drop" for="file"><span id="fileName">PDF를 끌어다 놓거나 눌러서 고르기</span>
+    <input id="file" type="file" accept="application/pdf,.pdf" class="hidden"></label>
+  <div class="row" style="margin-top:8px">
+    <label>쪽 범위 <input id="range" type="text" placeholder="예: 1-5,8 (비우면 전체)" size="22"></label>
+    <span id="pageInfo" class="hint"></span>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>2. OCR 엔진</legend>
+  <label><input type="radio" name="engine" value="tesseract" checked> Tesseract (무료 · 내 컴퓨터에서 처리)</label>
+  <label><input type="radio" name="engine" value="claude"> Claude API (유료 · 정확도 높음)</label>
+  <div id="claudeBox" class="hidden" style="margin-top:8px">
+    <div class="row">
+      <label>모델 <select id="model">
+        <option value="claude-sonnet-5-5" selected>Claude Sonnet 5.5 (기본)</option>
+        <option value="claude-haiku-4-5">Claude Haiku 4.5 (저렴)</option>
+        <option value="claude-opus-5-5">Claude Opus 5.5 (최고 품질)</option>
+      </select></label>
+    </div>
+    <label style="display:block">API 키 <input id="apiKey" type="password" autocomplete="off" placeholder="sk-ant-..."></label>
+    <label><input id="rememberKey" type="checkbox"> 이 브라우저에 키 기억</label>
+    <p class="hint">키는 api.anthropic.com 호출에만 씁니다. 기억을 끄면 창을 닫을 때 사라집니다. 공용 컴퓨터에서는 끄기.</p>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>3. 언어</legend>
+  <label><input type="checkbox" name="lang" value="kor" checked> 한글</label>
+  <label><input type="checkbox" name="lang" value="eng" checked> 영어</label>
+  <label><input type="checkbox" name="lang" value="grc"> 헬라어</label>
+  <label><input type="checkbox" name="lang" value="heb"> 히브리어</label>
+  <p class="hint">실제로 나오는 언어만 고르기. 많이 고를수록 Tesseract가 느려지고 오인식이 늘어남.</p>
+</fieldset>
+
+<fieldset>
+  <legend>4. 출력</legend>
+  <label><input id="outMd" type="checkbox" checked> Markdown (.md)</label>
+  <label><input id="outPdf" type="checkbox" checked> 검색 가능한 PDF</label>
+  <label>해상도 <select id="dpi"><option value="200">200 dpi (빠름)</option><option value="300" selected>300 dpi (권장)</option><option value="400">400 dpi (작은 글씨)</option></select></label>
+  <p id="pdfNote" class="hint hidden">Claude 모드에서 검색 PDF를 고르면 글자 위치 확보를 위해 Tesseract도 함께 돌림.</p>
+</fieldset>
+
+<div class="row">
+  <button id="start" disabled>변환 시작</button>
+  <button id="cancel" class="ghost" disabled>취소</button>
+</div>
+
+<div style="margin-top:16px">
+  <progress id="bar" value="0" max="1"></progress>
+  <div id="status">파일을 고르기.</div>
+  <div id="log"></div>
+</div>
+
+<div id="results" class="hidden" style="margin-top:16px">
+  <div id="links"></div>
+  <textarea id="preview" readonly></textarea>
+</div>
+</main>
+
+<script type="module">
+// ── 라이브러리 경로 ─────────────────────────────────────────────
+// 기본은 jsdelivr. 테스트·오프라인용으로 ?cdn=<node_modules 경로>/ 와 ?lang=<traineddata 폴더> 지정 가능.
+const params = new URLSearchParams(location.search);
+const LOCAL = params.get('cdn');
+const pkg = (name, ver, path) => new URL(LOCAL ? `${LOCAL}${name}/${path}` : `https://cdn.jsdelivr.net/npm/${name}@${ver}/${path}`, location.href).href;
+const LIB = {
+  tesseract: pkg('tesseract.js', '7.0.0', 'dist/tesseract.min.js'),
+  tessWorker: pkg('tesseract.js', '7.0.0', 'dist/worker.min.js'),
+  tessCore: pkg('tesseract.js-core', '7.0.0', ''),
+  pdfjs: pkg('pdfjs-dist', '6.3.289', 'legacy/build/pdf.min.mjs'),
+  pdfjsWorker: pkg('pdfjs-dist', '6.3.289', 'legacy/build/pdf.worker.min.mjs'),
+  pdflib: pkg('pdf-lib', '1.17.1', 'dist/pdf-lib.min.js'),
+};
+const LANG_PATH = params.get('lang') ? new URL(params.get('lang'), location.href).href : undefined; // 비우면 tesseract.js가 언어별로 jsdelivr에서 받음
+
+const API_URL = 'https://api.anthropic.com/v1/messages';
+const KEY_STORE = 'scanocr.apiKey';
+
+// ── 화면 요소 ───────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const ui = {
+  file: $('file'), drop: $('drop'), fileName: $('fileName'), range: $('range'), pageInfo: $('pageInfo'),
+  claudeBox: $('claudeBox'), model: $('model'), apiKey: $('apiKey'), rememberKey: $('rememberKey'),
+  outMd: $('outMd'), outPdf: $('outPdf'), dpi: $('dpi'), pdfNote: $('pdfNote'),
+  start: $('start'), cancel: $('cancel'), bar: $('bar'), status: $('status'), log: $('log'),
+  results: $('results'), links: $('links'), preview: $('preview'),
+};
+
+let srcFile = null, srcBytes = null, pageCount = 0;
+let job = null; // { cancelled, abort: AbortController, worker }
+
+function log(msg, cls) {
+  ui.log.style.display = 'block';
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  ui.log.appendChild(line);
+  ui.log.scrollTop = ui.log.scrollHeight;
+}
+const setStatus = (msg) => { ui.status.textContent = msg; };
+const engine = () => document.querySelector('input[name=engine]:checked').value;
+const langs = () => [...document.querySelectorAll('input[name=lang]:checked')].map((el) => el.value);
+
+// ── 설정 저장(키는 체크박스가 켜졌을 때만) ─────────────────────
+function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} }
+function load(k) { try { return localStorage.getItem(k); } catch { return null; } }
+const savedKey = load(KEY_STORE);
+if (savedKey) { ui.apiKey.value = savedKey; ui.rememberKey.checked = true; }
+ui.rememberKey.addEventListener('change', () => store(KEY_STORE, ui.rememberKey.checked ? ui.apiKey.value : null));
+ui.apiKey.addEventListener('input', () => { if (ui.rememberKey.checked) store(KEY_STORE, ui.apiKey.value); });
+
+function syncEngineUI() {
+  const c = engine() === 'claude';
+  ui.claudeBox.classList.toggle('hidden', !c);
+  ui.pdfNote.classList.toggle('hidden', !(c && ui.outPdf.checked));
+}
+document.querySelectorAll('input[name=engine]').forEach((el) => el.addEventListener('change', syncEngineUI));
+ui.outPdf.addEventListener('change', syncEngineUI);
+
+// ── 라이브러리 로드 ─────────────────────────────────────────────
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = ok; s.onerror = () => fail(new Error(`스크립트 로드 실패: ${src}`));
+    document.head.appendChild(s);
+  });
+}
+let pdfjsLib = null;
+async function getPdfjs() {
+  if (pdfjsLib) return pdfjsLib;
+  pdfjsLib = await import(LIB.pdfjs);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = LIB.pdfjsWorker;
+  // 다른 출처의 워커 파일은 바로 new Worker() 못 함 → blob 모듈 워커로 감싸서 import.
+  // file://로 연 페이지는 모듈 워커 자체가 막힘 → workerSrc만 두면 pdf.js가 메인 스레드 방식으로 전환
+  if (location.protocol !== 'file:') {
+    try {
+      const blob = new Blob([`import ${JSON.stringify(LIB.pdfjsWorker)};`], { type: 'text/javascript' });
+      pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(URL.createObjectURL(blob), { type: 'module' });
+    } catch {}
+  }
+  return pdfjsLib;
+}
+async function getPdfLib() {
+  if (!window.PDFLib) await loadScript(LIB.pdflib);
+  return window.PDFLib;
+}
+async function getTesseract() {
+  if (!window.Tesseract) await loadScript(LIB.tesseract);
+  return window.Tesseract;
+}
+
+// ── 파일 선택 ───────────────────────────────────────────────────
+async function pickFile(f) {
+  if (!f) return;
+  if (!/\.pdf$/i.test(f.name) && f.type !== 'application/pdf') { setStatus('PDF 파일만 됩니다.'); return; }
+  srcFile = f;
+  srcBytes = new Uint8Array(await f.arrayBuffer());
+  ui.fileName.textContent = f.name;
+  ui.pageInfo.textContent = '쪽 수 확인 중…';
+  try {
+    const lib = await getPdfjs();
+    const task = lib.getDocument({ data: srcBytes.slice() });
+    const doc = await task.promise;
+    pageCount = doc.numPages;
+    await task.destroy();
+    ui.pageInfo.textContent = `전체 ${pageCount}쪽`;
+    ui.start.disabled = false;
+    setStatus('설정 확인 후 [변환 시작].');
+  } catch (e) {
+    ui.pageInfo.textContent = '';
+    setStatus(`PDF를 열지 못함: ${e.message}`);
+    log(String(e.stack || e), 'warn');
+  }
+}
+ui.file.addEventListener('change', () => pickFile(ui.file.files[0]));
+['dragenter', 'dragover'].forEach((t) => ui.drop.addEventListener(t, (e) => { e.preventDefault(); ui.drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((t) => ui.drop.addEventListener(t, (e) => { e.preventDefault(); ui.drop.classList.remove('over'); }));
+ui.drop.addEventListener('drop', (e) => pickFile(e.dataTransfer.files[0]));
+
+// "1-3,5" → [1,2,3,5]
+function parseRange(text, max) {
+  const t = text.trim();
+  if (!t) return Array.from({ length: max }, (_, i) => i + 1);
+  const set = new Set();
+  for (const part of t.split(/[,\s]+/).filter(Boolean)) {
+    const m = part.match(/^(\d+)(?:-(\d+))?$/);
+    if (!m) throw new Error(`쪽 범위 형식 오류: "${part}"`);
+    let a = +m[1], b = m[2] ? +m[2] : a;
+    if (a > b) [a, b] = [b, a];
+    if (a < 1 || b > max) throw new Error(`쪽 범위는 1~${max} 사이: "${part}"`);
+    for (let i = a; i <= b; i++) set.add(i);
+  }
+  return [...set].sort((x, y) => x - y);
+}
+
+// ── 쪽 → 이미지 ────────────────────────────────────────────────
+async function renderPage(pdfDoc, n, dpi) {
+  const page = await pdfDoc.getPage(n);
+  const viewport = page.getViewport({ scale: dpi / 72 });
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext('2d', { alpha: false });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, canvas, viewport }).promise;
+  page.cleanup();
+  return canvas;
+}
+
+// Claude 전송용: 긴 변 2000px 이하 JPEG
+function canvasToJpegBase64(canvas, maxSide = 2000) {
+  const s = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
+  let c = canvas;
+  if (s < 1) {
+    c = document.createElement('canvas');
+    c.width = Math.round(canvas.width * s);
+    c.height = Math.round(canvas.height * s);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(canvas, 0, 0, c.width, c.height);
+  }
+  return c.toDataURL('image/jpeg', 0.9).split(',')[1];
+}
+
+// ── Tesseract ──────────────────────────────────────────────────
+async function makeWorker(langList) {
+  const T = await getTesseract();
+  const opts = {
+    workerPath: LIB.tessWorker,
+    corePath: LIB.tessCore,
+    logger: (m) => { if (m.status && m.progress === 1 && m.status !== 'recognizing text') log(`Tesseract: ${m.status}`); },
+    errorHandler: (e) => log(`Tesseract 오류: ${e}`, 'warn'),
+  };
+  if (LANG_PATH) opts.langPath = LANG_PATH;
+  log(`Tesseract 준비 (${langList.join('+')}) — 처음 한 번은 언어 데이터 내려받기로 시간이 걸림`);
+  const w = await T.createWorker(langList.join('+'), 1, opts);
+  // 문단 판별을 위해 페이지 분할 모드는 자동(3) 유지, 띄어쓰기 보존
+  await w.setParameters({ preserve_interword_spaces: '1' });
+  return w;
+}
+
+const BIDI_MARKS = /[‎‏‪-‮⁦-⁩]/g;
+const HANGUL = /[ᄀ-ᇿ㄰-㆏가-힯]/;
+const RTL_CHAR = /[֐-ࣿיִ-﷿ﹰ-﻿]/;
+const NOISE_ONLY = /^[\p{P}\p{S}\s㄰-㆏]*$/u; // 문장부호·기호·낱자모(ㅅㅅ 같은 얼룩)뿐인 줄
+const LATIN_END_HYPHEN = /[A-Za-zÀ-ɏͰ-Ͽἀ-῿]-$/;
+const STARTS_LOWER = /^[a-zà-ÿͰ-Ͽἀ-῿]/;
+const unionBox = (a, b) => ({ x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) });
+
+// 줄 하나 → 띄어쓰기 단위 낱말 묶음.
+// Tesseract 한글 모델은 word를 음절마다 쪼개고(줄 text는 정상), 히브리어는 줄 text에서 띄어쓰기를 빠뜨림(word는 정상).
+// 그래서 줄 text의 공백을 기준으로 word를 묶고, 한글끼리가 아닌 경계는 실제 간격이 넓으면 띄움.
+function lineGroups(line) {
+  const ws = (line.words || []).map((w) => ({ text: (w.text || '').replace(BIDI_MARKS, '').trim(), bbox: w.bbox })).filter((w) => w.text);
+  const lt = (line.text || '').replace(BIDI_MARKS, '');
+  const h = Math.max(1, line.bbox.y1 - line.bbox.y0);
+  const groups = [];
+  let pos = 0;
+  for (const w of ws) {
+    let spaced = false;
+    const q = lt.indexOf(w.text, pos);
+    if (q >= 0 && q - pos <= 3) { spaced = /\s/.test(lt.slice(pos, q)); pos = q + w.text.length; }
+    else spaced = true; // 줄 text와 맞추기 실패 → 띄움
+    const prev = groups[groups.length - 1];
+    if (prev && !spaced && !(HANGUL.test(prev.text.slice(-1)) && HANGUL.test(w.text[0]))) {
+      const gap = Math.min(Math.abs(w.bbox.x0 - prev.last.x1), Math.abs(prev.last.x0 - w.bbox.x1));
+      if (gap > 0.35 * h) spaced = true;
+    }
+    if (prev && !spaced) { prev.text += w.text; prev.bbox = unionBox(prev.bbox, w.bbox); prev.last = w.bbox; }
+    else groups.push({ text: w.text, bbox: { ...w.bbox }, last: w.bbox });
+  }
+  return groups;
+}
+
+// blocks → 줄 목록(잡음 제거)
+function pageLines(blocks) {
+  const out = [];
+  for (const b of blocks || []) {
+    for (const p of b.paragraphs || []) {
+      let first = true;
+      for (const l of p.lines || []) {
+        const groups = lineGroups(l);
+        const text = groups.map((g) => g.text).join(' ');
+        if (NOISE_ONLY.test(text)) continue;
+        if ((l.confidence ?? 100) < 40 && text.length <= 3) continue;
+        out.push({ text, groups, bbox: l.bbox, baseline: l.baseline, h: Math.max(1, l.bbox.y1 - l.bbox.y0), newPara: first });
+        first = false;
+      }
+    }
+  }
+  return out;
+}
+
+// 줄 목록 → Markdown. 줄 간격이 벌어지거나 글자 크기가 바뀌면 문단을 나누고, 큰 글자 짧은 문단은 제목(##)으로.
+function linesToMarkdown(lines) {
+  if (!lines.length) return '';
+  const hs = lines.map((l) => l.h).sort((a, b) => a - b);
+  const med = hs[Math.floor(hs.length / 2)];
+  const paras = [];
+  let cur = null, prev = null;
+  for (const l of lines) {
+    const gap = prev ? l.bbox.y0 - prev.bbox.y1 : 0;
+    const split = !cur || l.newPara || gap > 0.9 * med || Math.abs(l.h - prev.h) > 0.3 * med;
+    if (split) { cur = { lines: [] }; paras.push(cur); }
+    cur.lines.push(l);
+    prev = l;
+  }
+  return paras.map((p) => {
+    let text = '';
+    for (const l of p.lines) {
+      if (!text) text = l.text;
+      else if (LATIN_END_HYPHEN.test(text) && STARTS_LOWER.test(l.text)) text = text.slice(0, -1) + l.text; // 영·헬 하이픈 끊김 복원
+      else text += ' ' + l.text;
+    }
+    text = text.replace(/[ \t]{2,}/g, ' ').trim();
+    const avgH = p.lines.reduce((s, l) => s + l.h, 0) / p.lines.length;
+    if (p.lines.length <= 2 && avgH >= 1.25 * med && text.length <= 80) text = '## ' + text;
+    return text;
+  }).filter(Boolean).join('\n\n');
+}
+
+function baselineY(l, x) {
+  const b = l.baseline;
+  if (!b || !(b.x1 > b.x0)) return l.bbox.y1;
+  return b.y0 + (b.y1 - b.y0) * (x - b.x0) / (b.x1 - b.x0);
+}
+
+// Tesseract 텍스트 전용 PDF에서 글꼴(GlyphLessFont)만 살리고, 내용은 낱말 묶음 단위로 다시 씀
+async function rebuildTextLayer(tessPdf, lines, imgW) {
+  const { PDFDocument, PDFName, PDFDict } = await getPdfLib();
+  const doc = await PDFDocument.load(tessPdf);
+  const page = doc.getPage(0);
+  const { width: PW, height: PH } = page.getSize();
+  const k = PW / imgW;
+  const fonts = page.node.Resources().lookup(PDFName.of('Font'), PDFDict);
+  const fontName = fonts.keys()[0].toString();
+  const f = (v) => v.toFixed(3);
+  let s = 'BT\n3 Tr\n';
+  for (const l of lines) {
+    const fs = l.h * k;
+    for (const g of l.groups) {
+      const rtl = RTL_CHAR.test(g.text);
+      // PDF 텍스트는 보이는 순서(왼→오)로 넣어야 뷰어가 양방향 재배열로 읽는 순서를 되살림 → 히브리어는 글자 묶음(자음+모음점) 단위로 뒤집음
+      const clusters = g.text.match(/\P{M}\p{M}*/gu) || [];
+      const chars = [...(rtl ? clusters.reverse().join('') : g.text)].filter((c) => c.codePointAt(0) <= 0xffff);
+      if (!chars.length) continue;
+      const tz = (100 * (g.bbox.x1 - g.bbox.x0) * k) / (chars.length * 0.5 * fs); // 글자 폭 0.5em(DW 500)
+      const y = PH - baselineY(l, (g.bbox.x0 + g.bbox.x1) / 2) * k;
+      const x = g.bbox.x0 * k;
+      const hex = [...chars, ' '].map((c) => c.charCodeAt(0).toString(16).padStart(4, '0')).join('').toUpperCase();
+      s += `1 0 0 1 ${f(x)} ${f(y)} Tm ${fontName} ${f(fs)} Tf ${f(tz)} Tz [<${hex}>] TJ\n`;
+    }
+  }
+  s += 'ET\n';
+  page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.flateStream(s)));
+  return doc.save();
+}
+
+async function tesseractPage(worker, canvas, wantPdf, n) {
+  const { data } = await worker.recognize(
+    canvas,
+    { pdfTitle: `page ${n}`, pdfTextOnly: true },
+    { text: true, blocks: true, pdf: wantPdf },
+  );
+  const lines = pageLines(data.blocks);
+  return {
+    md: linesToMarkdown(lines),
+    pdf: wantPdf && data.pdf ? await rebuildTextLayer(new Uint8Array(data.pdf), lines, canvas.width) : null,
+    confidence: data.confidence,
+  };
+}
+
+// ── Claude API ─────────────────────────────────────────────────
+const LANG_NAMES = { kor: '한국어', eng: '영어', grc: '고대 헬라어(Koine/Classical Greek, 악센트·숨표 포함)', heb: '히브리어(성경 히브리어, 니쿠드가 있으면 그대로)' };
+const SYSTEM_PROMPT = [
+  'You transcribe scanned book and document pages into Markdown.',
+  'Output only the transcription — no preface, no commentary, no code fences.',
+  'Reproduce the text exactly as printed: keep spelling, punctuation, numbers, Bible references, and the original language of every word. Do not translate, summarize, correct, or modernize.',
+  'Greek: keep all accents and breathing marks. Hebrew: write in logical (reading) order, keep vowel points and cantillation if printed.',
+  'Structure: use # / ## for visible headings, blank lines between paragraphs, - or 1. for lists, > for block quotes, and Markdown tables for tables.',
+  'Join lines that belong to the same paragraph. Remove end-of-line hyphenation only when a word was split across lines.',
+  'Drop running heads and page numbers at the very top or bottom of the page. Put footnotes at the end of the page as plain paragraphs starting with their marker.',
+  'If a word is unreadable, write [?]. If the page has no text, output nothing.',
+].join('\n');
+
+function sleep(ms, signal) {
+  return new Promise((ok, fail) => {
+    const t = setTimeout(ok, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); fail(new DOMException('취소', 'AbortError')); }, { once: true });
+  });
+}
+
+async function claudePage(canvas, n, model, apiKey, langList, signal) {
+  const img = canvasToJpegBase64(canvas);
+  const langHint = langList.length ? `이 쪽의 언어: ${langList.map((l) => LANG_NAMES[l]).join(', ')}.` : '';
+  const body = {
+    model,
+    max_tokens: 16000,
+    system: SYSTEM_PROMPT,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: img } },
+        { type: 'text', text: `원본 ${n}쪽. ${langHint} Transcribe this page into Markdown.` },
+      ],
+    }],
+  };
+  const useFallback = model === 'claude-sonnet-5-5' || model === 'claude-opus-5-5';
+  if (model !== 'claude-haiku-4-5') body.output_config = { effort: 'medium' };
+  if (useFallback) body.fallbacks = 'default'; // 안전 분류기가 거절하면 서버가 다른 모델로 재시도
+
+  let allowFallback = useFallback;
+  for (let attempt = 0; ; attempt++) {
+    const headers = {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    };
+    const sendBody = { ...body };
+    if (allowFallback) headers['anthropic-beta'] = 'server-side-fallback-2026-07-01';
+    else delete sendBody.fallbacks;
+
+    const res = await fetch(API_URL, { method: 'POST', headers, body: JSON.stringify(sendBody), signal });
+    if (res.ok) {
+      const msg = await res.json();
+      if (msg.stop_reason === 'refusal') {
+        log(`${n}쪽: 모델이 처리를 거절함 (${msg.stop_details?.category ?? '사유 없음'})`, 'warn');
+        return `> [!warning] ${n}쪽은 모델이 변환을 거절함`;
+      }
+      if (msg.stop_reason === 'max_tokens') log(`${n}쪽: 출력 한도에 걸려 끝이 잘렸을 수 있음`, 'warn');
+      return (msg.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    }
+
+    let err = {};
+    try { err = await res.json(); } catch {}
+    const detail = err?.error?.message || res.statusText;
+    if (res.status === 400 && allowFallback && /fallback|beta/i.test(detail)) {
+      log('fallbacks 옵션이 거부되어 빼고 다시 보냄', 'warn');
+      allowFallback = false;
+      continue;
+    }
+    if (res.status === 401) throw new Error('API 키가 올바르지 않음 (401)');
+    if (res.status === 403) throw new Error(`API 권한 없음 (403): ${detail}`);
+    const retryable = res.status === 429 || res.status === 408 || res.status >= 500;
+    if (retryable && attempt < 4) {
+      const ra = Number(res.headers.get('retry-after'));
+      const wait = Number.isFinite(ra) && ra > 0 ? ra * 1000 : 2000 * 2 ** attempt;
+      log(`${n}쪽: ${res.status} ${detail} → ${Math.round(wait / 1000)}초 후 재시도`, 'warn');
+      await sleep(wait, signal);
+      continue;
+    }
+    throw new Error(`API 오류 ${res.status}: ${detail}`);
+  }
+}
+
+// ── 검색층 합치기 ──────────────────────────────────────────────
+// Tesseract의 텍스트 전용 PDF 쪽을 원본 쪽 위에 투명하게 겹침(원본 이미지·용량 그대로)
+async function overlayText(outDoc, PDFLib, pageIndex, textPdfBytes) {
+  const page = outDoc.getPage(pageIndex);
+  const [emb] = await outDoc.embedPdf(textPdfBytes, [0]);
+  const box = page.getCropBox();
+  const rot = ((page.getRotation().angle % 360) + 360) % 360;
+  const { degrees } = PDFLib;
+  const W = box.width, H = box.height;
+  // 텍스트층은 "보이는 방향" 기준으로 만들어졌으므로 쪽 회전에 맞춰 되돌려 그림
+  if (rot === 90) page.drawPage(emb, { x: box.x + W, y: box.y, width: H, height: W, rotate: degrees(90) });
+  else if (rot === 180) page.drawPage(emb, { x: box.x + W, y: box.y + H, width: W, height: H, rotate: degrees(180) });
+  else if (rot === 270) page.drawPage(emb, { x: box.x, y: box.y + H, width: H, height: W, rotate: degrees(270) });
+  else page.drawPage(emb, { x: box.x, y: box.y, width: W, height: H });
+}
+
+// ── 실행 ───────────────────────────────────────────────────────
+function download(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.textContent = `⬇ ${name}`;
+  ui.links.appendChild(a);
+}
+
+function setRunning(on) {
+  ui.start.disabled = on || !srcBytes;
+  ui.cancel.disabled = !on;
+  document.querySelectorAll('fieldset input, fieldset select').forEach((el) => { el.disabled = on; });
+}
+
+ui.cancel.addEventListener('click', async () => {
+  const j = job;
+  if (!j || j.cancelled) return;
+  j.cancelled = true;
+  j.abort.abort();
+  setStatus('취소 중…');
+  const w = j.worker;
+  j.worker = null;
+  if (w) { try { await w.terminate(); } catch {} }
+});
+
+ui.start.addEventListener('click', async () => {
+  const eng = engine();
+  const langList = langs();
+  const wantMd = ui.outMd.checked, wantPdf = ui.outPdf.checked;
+  const dpi = +ui.dpi.value;
+  const model = ui.model.value;
+  const apiKey = ui.apiKey.value.trim();
+
+  if (!wantMd && !wantPdf) return setStatus('출력 형식을 하나 이상 고르기.');
+  if (!langList.length) return setStatus('언어를 하나 이상 고르기.');
+  if (eng === 'claude' && wantMd && !apiKey) return setStatus('Claude 모드는 API 키가 필요함.');
+  let pages;
+  try { pages = parseRange(ui.range.value, pageCount); } catch (e) { return setStatus(e.message); }
+
+  const useTess = eng === 'tesseract' || wantPdf;
+  const useClaude = eng === 'claude' && wantMd;
+  job = { cancelled: false, abort: new AbortController(), worker: null };
+  // 취소 시 진행 중인 await를 바로 끊기 위한 약속(종료된 Tesseract 워커는 응답하지 않음)
+  const stopped = new Promise((_, rej) => job.abort.signal.addEventListener('abort', () => rej(new DOMException('취소', 'AbortError')), { once: true }));
+  stopped.catch(() => {});
+  const orStop = (p) => Promise.race([p, stopped]);
+  setRunning(true);
+  ui.status.className = '';
+  ui.results.classList.add('hidden');
+  ui.links.querySelectorAll('a').forEach((a) => URL.revokeObjectURL(a.href));
+  ui.links.innerHTML = '';
+  ui.log.innerHTML = '';
+  ui.bar.value = 0; ui.bar.max = pages.length;
+
+  const mdParts = [];
+  const textLayers = new Map(); // pageNo → bytes
+  let pdfTask = null, pdfDoc = null;
+  const t0 = performance.now();
+  let failed = '';
+  try {
+    setStatus('라이브러리 불러오는 중…');
+    const lib = await getPdfjs();
+    pdfTask = lib.getDocument({ data: srcBytes.slice() });
+    pdfDoc = await pdfTask.promise;
+    if (useTess) {
+      const j = job;
+      const wp = makeWorker(langList);
+      wp.then((w) => { if (j.cancelled) w.terminate(); }, () => {}); // 준비 중 취소되면 늦게 생긴 워커도 정리
+      job.worker = await orStop(wp);
+    }
+
+    for (let i = 0; i < pages.length; i++) {
+      if (job.cancelled) break;
+      const n = pages[i];
+      setStatus(`${n}쪽 처리 중 (${i + 1}/${pages.length})`);
+      const canvas = await orStop(renderPage(pdfDoc, n, dpi));
+      let md = '';
+      if (useTess) {
+        const r = await orStop(tesseractPage(job.worker, canvas, wantPdf, n));
+        if (r.pdf) textLayers.set(n, r.pdf);
+        md = r.md;
+        log(`${n}쪽 Tesseract 완료 (신뢰도 ${Math.round(r.confidence ?? 0)}%)`);
+      }
+      if (job.cancelled) break;
+      if (useClaude) {
+        md = await claudePage(canvas, n, model, apiKey, langList, job.abort.signal);
+        log(`${n}쪽 Claude 완료`);
+      }
+      canvas.width = canvas.height = 0; // 메모리 반환
+      mdParts.push(`<!-- 원본 ${n}쪽 -->\n\n${md}`);
+      ui.bar.value = i + 1;
+    }
+  } catch (e) {
+    if (!job.cancelled) {
+      failed = e.message;
+      setStatus(`오류: ${e.message}`);
+      log(String(e.stack || e), 'warn');
+    }
+  }
+
+  const cancelled = job.cancelled;
+  const done = mdParts.length;
+  try {
+    if (job.worker) await job.worker.terminate();
+  } catch {}
+  if (pdfTask) { try { await pdfTask.destroy(); } catch {} }
+
+  if (done) {
+    const base = srcFile.name.replace(/\.pdf$/i, '');
+    if (wantMd) {
+      const md = mdParts.join('\n\n') + '\n';
+      ui.preview.value = md;
+      download(`${base}.md`, new Blob([md], { type: 'text/markdown;charset=utf-8' }));
+    } else {
+      ui.preview.value = '';
+    }
+    if (wantPdf && textLayers.size) {
+      setStatus('검색 PDF 만드는 중…');
+      try {
+        const PDFLib = await getPdfLib();
+        const outDoc = await PDFLib.PDFDocument.load(srcBytes, { ignoreEncryption: true, updateMetadata: false });
+        for (const [n, bytes] of textLayers) await overlayText(outDoc, PDFLib, n - 1, bytes);
+        const out = await outDoc.save();
+        download(`${base}_ocr.pdf`, new Blob([out], { type: 'application/pdf' }));
+      } catch (e) {
+        log(`검색 PDF 생성 실패: ${e.message}`, 'warn');
+        log(String(e.stack || e), 'warn');
+      }
+    }
+    ui.preview.classList.toggle('hidden', !wantMd);
+    ui.results.classList.remove('hidden');
+    const sec = Math.round((performance.now() - t0) / 1000);
+    if (failed) setStatus(`오류로 중단 — ${done}쪽까지 저장: ${failed}`);
+    else setStatus(cancelled ? `취소됨 — ${done}쪽까지 저장 (${sec}초)` : `완료 — ${done}쪽 (${sec}초)`);
+    ui.status.className = cancelled || failed ? 'warn' : 'ok';
+  } else if (cancelled) {
+    setStatus('취소됨');
+  }
+  job = null;
+  setRunning(false);
+});
+
+window.__scanocr = { parseRange, lineGroups, linesToMarkdown }; // 테스트용
+</script>
+</body>
+</html>
