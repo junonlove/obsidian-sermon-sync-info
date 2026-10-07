@@ -75,7 +75,9 @@ textarea{width:100%;min-height:260px;font:13px/1.5 ui-monospace,Menlo,Consolas,m
   <label><input type="checkbox" name="lang" value="eng" checked> 영어</label>
   <label><input type="checkbox" name="lang" value="grc"> 헬라어</label>
   <label><input type="checkbox" name="lang" value="heb"> 히브리어</label>
-  <p class="hint">실제로 나오는 언어만 고르기. 많이 고를수록 Tesseract가 느려지고 오인식이 늘어남.</p>
+  <p class="hint">실제로 나오는 언어만 고르기. 많이 고를수록 Tesseract가 느려지고 오인식이 늘어남.
+    히브리어·헬라어를 다른 언어와 함께 고르면 해당 줄만 전용 모델로 한 번 더 읽어 보정함.</p>
+  <label><input id="stripPoints" type="checkbox" checked> 히브리어 모음점·악센트 빼기 (Tesseract만 · 자음만 남겨 검색이 잘 됨)</label>
 </fieldset>
 
 <fieldset>
@@ -127,7 +129,7 @@ const $ = (id) => document.getElementById(id);
 const ui = {
   file: $('file'), drop: $('drop'), fileName: $('fileName'), range: $('range'), pageInfo: $('pageInfo'),
   claudeBox: $('claudeBox'), model: $('model'), apiKey: $('apiKey'), rememberKey: $('rememberKey'),
-  outMd: $('outMd'), outPdf: $('outPdf'), dpi: $('dpi'), pdfNote: $('pdfNote'),
+  stripPoints: $('stripPoints'), outMd: $('outMd'), outPdf: $('outPdf'), dpi: $('dpi'), pdfNote: $('pdfNote'),
   start: $('start'), cancel: $('cancel'), bar: $('bar'), status: $('status'), log: $('log'),
   results: $('results'), links: $('links'), preview: $('preview'),
 };
@@ -296,11 +298,10 @@ const unionBox = (a, b) => ({ x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0)
 
 // 줄 하나 → 띄어쓰기 단위 낱말 묶음.
 // Tesseract 한글 모델은 word를 음절마다 쪼개고(줄 text는 정상), 히브리어는 줄 text에서 띄어쓰기를 빠뜨림(word는 정상).
-// 그래서 줄 text의 공백을 기준으로 word를 묶고, 한글끼리가 아닌 경계는 실제 간격이 넓으면 띄움.
+// 그래서 한글 음절끼리는 줄 text의 공백을 기준으로 묶고, 나머지 문자는 word마다 띄움.
 function lineGroups(line) {
   const ws = (line.words || []).map((w) => ({ text: (w.text || '').replace(BIDI_MARKS, '').trim(), bbox: w.bbox })).filter((w) => w.text);
   const lt = (line.text || '').replace(BIDI_MARKS, '');
-  const h = Math.max(1, line.bbox.y1 - line.bbox.y0);
   const groups = [];
   let pos = 0;
   for (const w of ws) {
@@ -309,9 +310,11 @@ function lineGroups(line) {
     if (q >= 0 && q - pos <= 3) { spaced = /\s/.test(lt.slice(pos, q)); pos = q + w.text.length; }
     else spaced = true; // 줄 text와 맞추기 실패 → 띄움
     const prev = groups[groups.length - 1];
-    if (prev && !spaced && !(HANGUL.test(prev.text.slice(-1)) && HANGUL.test(w.text[0]))) {
-      const gap = Math.min(Math.abs(w.bbox.x0 - prev.last.x1), Math.abs(prev.last.x0 - w.bbox.x1));
-      if (gap > 0.35 * h) spaced = true;
+    // 줄 text에 공백이 없어도 붙이는 경우는 한글 음절 사이와 문장부호뿐. 다른 문자는 Tesseract word 경계를 그대로 믿음
+    if (prev && !spaced) {
+      const glue = (HANGUL.test(prev.text.slice(-1)) && HANGUL.test(w.text[0]))
+        || /^\p{P}+$/u.test(w.text) || /^[([{“‘«]+$/u.test(prev.text);
+      if (!glue) spaced = true;
     }
     if (prev && !spaced) { prev.text += w.text; prev.bbox = unionBox(prev.bbox, w.bbox); prev.last = w.bbox; }
     else groups.push({ text: w.text, bbox: { ...w.bbox }, last: w.bbox });
@@ -403,17 +406,91 @@ async function rebuildTextLayer(tessPdf, lines, imgW) {
   return doc.save();
 }
 
-async function tesseractPage(worker, canvas, wantPdf, n) {
+// ── 히브리어·헬라어 줄 보정 ────────────────────────────────────
+// 여러 언어를 한꺼번에 켜면 Tesseract가 히브리어 줄을 영문 대문자·숫자로, 헬라어 낱말(καὶ)을 영문(kai)으로 잘못 읽음.
+// 1차 결과에서 히브리어·헬라어가 주가 되는 줄만 골라, 그 줄 영역을 잘라 해당 언어 전용 모델로 다시 읽음.
+const SCRIPT_RE = {
+  heb: /[\u05d0-\u05ea\ufb1d-\ufb4f]/u,
+  grc: /[\u0370-\u03ff\u1f00-\u1fff]/u,
+};
+const LATIN_UPPER = /[A-Z]/;
+const GREEK_UPPER = /[\u0391-\u03a9\u1f08-\u1f0f\u1f18-\u1f1d\u1f28-\u1f2f\u1f38-\u1f3f\u1f48-\u1f4d\u1f59-\u1f5f\u1f68-\u1f6f\u1fb8-\u1fbc\u1fc8-\u1fcc\u1fd8-\u1fdb\u1fe8-\u1fec\u1ff8-\u1ffc]/u;
+
+function scriptShare(text, lang) {
+  const letters = [...text.normalize('NFD')].filter((c) => /\p{L}/u.test(c));
+  if (!letters.length) return { share: 0, upperOthers: 0 };
+  const mine = letters.filter((c) => SCRIPT_RE[lang].test(c)).length;
+  const others = letters.filter((c) => !SCRIPT_RE[lang].test(c));
+  const upper = others.filter((c) => LATIN_UPPER.test(c) || (lang === 'heb' && GREEK_UPPER.test(c))).length;
+  return { share: mine / letters.length, upperOthers: others.length ? upper / others.length : 0 };
+}
+
+// 이 줄을 어느 전용 모델로 다시 읽을지(없으면 null)
+function pickRescueLang(text, langs) {
+  for (const lang of ['heb', 'grc']) {
+    if (!langs.includes(lang)) continue;
+    const { share, upperOthers } = scriptShare(text, lang);
+    if (share === 0) continue;
+    // 그 문자가 줄의 35% 이상이거나, 섞인 나머지가 대문자 잡음(R02, SRY, ὙΠῸ)이면 그 언어 줄로 봄
+    if (share >= 0.35 || (lang === 'heb' && share >= 0.1 && upperOthers >= 0.5)) return lang;
+  }
+  return null;
+}
+
+async function rescueLines(blocks, canvas, langs, getWorker) {
+  let fixed = 0;
+  for (const b of blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) {
+    const lang = pickRescueLang((l.text || '').replace(BIDI_MARKS, ''), langs);
+    if (!lang) continue;
+    const pad = Math.round((l.bbox.y1 - l.bbox.y0) * 0.25) + 4;
+    const x0 = Math.max(0, l.bbox.x0 - pad), y0 = Math.max(0, l.bbox.y0 - pad);
+    const x1 = Math.min(canvas.width, l.bbox.x1 + pad), y1 = Math.min(canvas.height, l.bbox.y1 + pad);
+    const crop = document.createElement('canvas');
+    crop.width = x1 - x0; crop.height = y1 - y0;
+    const ctx = crop.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, crop.width, crop.height);
+    ctx.drawImage(canvas, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+    const w = await getWorker(lang);
+    const { data } = await w.recognize(crop, {}, { blocks: true });
+    crop.width = crop.height = 0;
+    const newLines = (data.blocks || []).flatMap((bb) => (bb.paragraphs || []).flatMap((pp) => pp.lines || []));
+    const words = newLines.flatMap((nl) => nl.words || []);
+    const text = newLines.map((nl) => (nl.text || '').trim()).join(' ');
+    // 전용 모델 결과가 그 언어 문자로 채워졌을 때만 바꿈
+    if (!words.length || scriptShare(text.replace(BIDI_MARKS, ''), lang).share < 0.6) continue;
+    const shift = (bb) => bb && ({ x0: bb.x0 + x0, y0: bb.y0 + y0, x1: bb.x1 + x0, y1: bb.y1 + y0 });
+    l.words = words.map((wd) => ({ ...wd, bbox: shift(wd.bbox) }));
+    l.text = text;
+    if (newLines[0]?.baseline) l.baseline = shift(newLines[0].baseline);
+    fixed++;
+  }
+  return fixed;
+}
+
+// 히브리어 모음점·악센트 제거(자음만 남김). Tesseract는 모음점을 자주 틀려 검색을 방해함
+const HEB_MARKS = /[\u0591-\u05bd\u05bf\u05c1\u05c2\u05c4\u05c5\u05c7]/g;
+function stripHebrewPoints(blocks) {
+  for (const b of blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) {
+    l.text = (l.text || '').replace(HEB_MARKS, '');
+    for (const w of l.words || []) w.text = (w.text || '').replace(HEB_MARKS, '');
+  }
+}
+
+async function tesseractPage(worker, canvas, wantPdf, n, opts = {}) {
   const { data } = await worker.recognize(
     canvas,
     { pdfTitle: `page ${n}`, pdfTextOnly: true },
     { text: true, blocks: true, pdf: wantPdf },
   );
+  let fixed = 0;
+  if (opts.getWorker) fixed = await rescueLines(data.blocks, canvas, opts.langs, opts.getWorker);
+  if (opts.stripPoints) stripHebrewPoints(data.blocks);
   const lines = pageLines(data.blocks);
   return {
     md: linesToMarkdown(lines),
     pdf: wantPdf && data.pdf ? await rebuildTextLayer(new Uint8Array(data.pdf), lines, canvas.width) : null,
     confidence: data.confidence,
+    fixed,
   };
 }
 
@@ -538,9 +615,10 @@ ui.cancel.addEventListener('click', async () => {
   j.cancelled = true;
   j.abort.abort();
   setStatus('취소 중…');
-  const w = j.worker;
+  const ws = [j.worker, ...Object.values(j.extra)];
   j.worker = null;
-  if (w) { try { await w.terminate(); } catch {} }
+  j.extra = {};
+  for (const w of ws) { try { if (w) await (await w).terminate(); } catch {} }
 });
 
 ui.start.addEventListener('click', async () => {
@@ -548,6 +626,7 @@ ui.start.addEventListener('click', async () => {
   const langList = langs();
   const wantMd = ui.outMd.checked, wantPdf = ui.outPdf.checked;
   const dpi = +ui.dpi.value;
+  const stripPoints = ui.stripPoints.checked;
   const model = ui.model.value;
   const apiKey = ui.apiKey.value.trim();
 
@@ -559,11 +638,16 @@ ui.start.addEventListener('click', async () => {
 
   const useTess = eng === 'tesseract' || wantPdf;
   const useClaude = eng === 'claude' && wantMd;
-  job = { cancelled: false, abort: new AbortController(), worker: null };
+  job = { cancelled: false, abort: new AbortController(), worker: null, extra: {} };
   // 취소 시 진행 중인 await를 바로 끊기 위한 약속(종료된 Tesseract 워커는 응답하지 않음)
   const stopped = new Promise((_, rej) => job.abort.signal.addEventListener('abort', () => rej(new DOMException('취소', 'AbortError')), { once: true }));
   stopped.catch(() => {});
   const orStop = (p) => Promise.race([p, stopped]);
+  const getExtraWorker = (lang) => {
+    const j = job;
+    if (!j.extra[lang]) j.extra[lang] = makeWorker([lang]); // 언어별 전용 워커는 처음 필요할 때 한 번만 만듦
+    return orStop(j.extra[lang]);
+  };
   setRunning(true);
   ui.status.className = '';
   ui.results.classList.add('hidden');
@@ -596,10 +680,14 @@ ui.start.addEventListener('click', async () => {
       const canvas = await orStop(renderPage(pdfDoc, n, dpi));
       let md = '';
       if (useTess) {
-        const r = await orStop(tesseractPage(job.worker, canvas, wantPdf, n));
+        const r = await orStop(tesseractPage(job.worker, canvas, wantPdf, n, {
+          langs: langList,
+          getWorker: langList.length > 1 && (langList.includes('heb') || langList.includes('grc')) ? getExtraWorker : null,
+          stripPoints: stripPoints && langList.includes('heb'),
+        }));
         if (r.pdf) textLayers.set(n, r.pdf);
         md = r.md;
-        log(`${n}쪽 Tesseract 완료 (신뢰도 ${Math.round(r.confidence ?? 0)}%)`);
+        log(`${n}쪽 Tesseract 완료 (신뢰도 ${Math.round(r.confidence ?? 0)}%${r.fixed ? `, 히브리어·헬라어 ${r.fixed}줄 보정` : ''})`);
       }
       if (job.cancelled) break;
       if (useClaude) {
@@ -620,9 +708,9 @@ ui.start.addEventListener('click', async () => {
 
   const cancelled = job.cancelled;
   const done = mdParts.length;
-  try {
-    if (job.worker) await job.worker.terminate();
-  } catch {}
+  for (const w of [job.worker, ...Object.values(job.extra)]) {
+    try { if (w) await (await w).terminate(); } catch {}
+  }
   if (pdfTask) { try { await pdfTask.destroy(); } catch {} }
 
   if (done) {
